@@ -1,4 +1,4 @@
-use std::net::SocketAddr;
+use std::{net::SocketAddr, sync::Arc};
 
 use axum::{
     extract::State,
@@ -8,6 +8,7 @@ use axum::{
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
+use tokio::sync::RwLock;
 
 enum Error {
     InvalidMove(&'static str),
@@ -40,7 +41,6 @@ enum Player {
 }
 
 impl Player {
-    // Helper function to get the opposing player.
     fn opponent(&self) -> Player {
         match self {
             Player::X => Player::O,
@@ -71,15 +71,26 @@ struct GameState {
     to_play: Player,
 }
 
-#[derive(Debug, Deserialize, Copy, Clone)]
-struct PlayerMove {
-    row: usize,
-    col: usize,
+impl std::fmt::Display for GameState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for row in &self.board {
+            for cell in row {
+                let symbol = match cell {
+                    Cell::Empty => ".",
+                    Cell::Occupied(Player::X) => "X",
+                    Cell::Occupied(Player::O) => "O",
+                };
+                write!(f, "{} ", symbol)?;
+            }
+            writeln!(f)?;
+        }
+        writeln!(f, "Status: {:?}", self.status)?;
+        writeln!(f, "Next to play: {:?}", self.to_play)
+    }
 }
 
 impl GameState {
     fn check_status(&self) -> GameStatus {
-        // Check for a win
         for line in &WINNING_LINES {
             let cells_in_line = [
                 self.board[line[0].0][line[0].1],
@@ -96,7 +107,6 @@ impl GameState {
             }
         }
 
-        // Check for a draw
         if self
             .board
             .iter()
@@ -109,11 +119,25 @@ impl GameState {
     }
 }
 
-/// Attempts to make the move, checking for validity, whether the move finishes the game, and
-/// updating the game state.
-fn try_move(game_state: &mut GameState, player_move: PlayerMove) -> Result<(), Error> {
+#[derive(Debug, Deserialize, Copy, Clone)]
+struct PlayerMove {
+    row: usize,
+    col: usize,
+}
+
+type AppState = Arc<RwLock<GameState>>;
+
+fn try_move(
+    game_state: &mut GameState,
+    player: Player,
+    player_move: PlayerMove,
+) -> Result<(), Error> {
     if game_state.status != GameStatus::InProgress {
         return Err(Error::InvalidMove("Game is not in progress"));
+    }
+
+    if game_state.to_play != player {
+        return Err(Error::InvalidMove("Not your turn"));
     }
 
     let target_cell = &mut game_state.board[player_move.row][player_move.col];
@@ -122,21 +146,13 @@ fn try_move(game_state: &mut GameState, player_move: PlayerMove) -> Result<(), E
     }
 
     *target_cell = Cell::Occupied(game_state.to_play);
-    game_state.to_play = match game_state.to_play {
-        Player::X => Player::O,
-        Player::O => Player::X,
-    };
-
-    // Check for win or draw
-    let game_status = game_state.check_status();
-
-    game_state.status = game_status;
+    game_state.to_play = game_state.to_play.opponent();
+    game_state.status = game_state.check_status();
 
     Ok(())
 }
 
 fn minimax(game_state: &GameState) -> (i32, Option<PlayerMove>) {
-    // Check for terminal states (win, lose, draw)
     match game_state.check_status() {
         GameStatus::Win(winner) => {
             return if winner == Player::X {
@@ -151,12 +167,10 @@ fn minimax(game_state: &GameState) -> (i32, Option<PlayerMove>) {
 
     let mut moves = Vec::new();
 
-    // Iterate over all possible moves
     for r in 0..3 {
         for c in 0..3 {
             if game_state.board[r][c] == Cell::Empty {
                 let mut new_state = *game_state;
-                // We don't need `try_move` here because we've already checked the cell is empty.
                 new_state.board[r][c] = Cell::Occupied(new_state.to_play);
                 new_state.to_play = new_state.to_play.opponent();
                 let (score, _) = minimax(&new_state);
@@ -165,8 +179,6 @@ fn minimax(game_state: &GameState) -> (i32, Option<PlayerMove>) {
         }
     }
 
-    // AI is 'O', the minimizing player. It will choose the move with the lowest score.
-    // Human is 'X', the maximizing player. It will choose the move with the highest score.
     if game_state.to_play == Player::O {
         moves
             .iter()
@@ -184,42 +196,46 @@ fn minimax(game_state: &GameState) -> (i32, Option<PlayerMove>) {
 
 fn do_optimal_move(game_state: &mut GameState) -> Result<(), Error> {
     if game_state.status != GameStatus::InProgress {
-        return Err(Error::InvalidMove("Game is not in progress"));
+        return Ok(()); // Not an error, just nothing to do.
     }
 
     let (_, optimal_move) = minimax(game_state);
     if let Some(player_move) = optimal_move {
-        try_move(game_state, player_move)?;
-        Ok(())
+        try_move(game_state, Player::O, player_move)
     } else {
-        Err(Error::InvalidMove("No valid moves available"))
+        Err(Error::InvalidMove("AI could not find a valid move"))
     }
 }
 
-/// Updates the state of the board, current player, and game status.
 async fn update_game_state(
-    State(mut game_state): State<GameState>,
+    State(state): State<AppState>,
     Json(player_move): Json<PlayerMove>,
-) -> Result<Json<GameState>, crate::Error> {
-    // process player move, validating it too
-    // updates the game state accordingly
-    try_move(&mut game_state, player_move)?;
-    do_optimal_move(&mut game_state)?;
+) -> Result<Json<GameState>, Error> {
+    let mut game_state = state.write().await;
 
-    Ok(Json(game_state))
+    try_move(&mut game_state, Player::X, player_move)?;
+
+    if game_state.status == GameStatus::InProgress {
+        do_optimal_move(&mut game_state)?;
+    }
+
+    println!("Updated game state:\n{}", game_state);
+    Ok(Json(*game_state))
 }
 
 #[tokio::main]
 async fn main() {
+    let app_state = Arc::new(RwLock::new(GameState {
+        board: [[Cell::Empty; 3]; 3],
+        status: GameStatus::InProgress,
+        to_play: Player::X,
+    }));
     let app = Router::new()
         .route("/api/move", post(update_game_state))
-        .with_state(GameState {
-            board: [[Cell::Empty; 3]; 3],
-            status: GameStatus::InProgress,
-            to_play: Player::X, // X (human) starts the game
-        });
+        .with_state(app_state);
 
     let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
+    println!("Listening on http://{}", addr);
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
     axum::serve(listener, app)
         .await
