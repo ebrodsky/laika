@@ -314,7 +314,7 @@ async fn main() {
         .layer(cors);
 
     // Start the server.
-    let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
+    let addr = SocketAddr::from(([0, 0, 0, 0], 3000));
     log::info!("Server starting...");
     log::info!("Listening on http://{}", addr);
 
