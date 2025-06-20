@@ -1,15 +1,17 @@
 use axum::{
-    extract::State,
+    extract::{Path, State},
     http::{Method, StatusCode},
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::post,
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
-use std::{net::SocketAddr, sync::Arc};
+use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 use tokio::sync::RwLock;
 use tower_http::cors::CorsLayer;
+use uuid::Uuid;
 
+// --- Error Handling ---
 enum Error {
     InvalidMove(&'static str),
 }
@@ -22,6 +24,8 @@ impl IntoResponse for Error {
         (status, error_message).into_response()
     }
 }
+
+// --- Game Logic Constants and Types ---
 
 static WINNING_LINES: [[(usize, usize); 3]; 8] = [
     [(0, 0), (0, 1), (0, 2)],
@@ -64,6 +68,7 @@ enum GameStatus {
 
 type GameBoard = [[Cell; 3]; 3];
 
+// The state for a single game.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 struct GameState {
     board: GameBoard,
@@ -71,7 +76,6 @@ struct GameState {
     to_play: Player,
 }
 
-// Implement the Default trait for easy game state resetting.
 impl Default for GameState {
     fn default() -> Self {
         Self {
@@ -130,13 +134,13 @@ impl GameState {
     }
 }
 
+// --- AI and Move Logic ---
+
 #[derive(Debug, Deserialize, Copy, Clone)]
 struct PlayerMove {
     row: usize,
     col: usize,
 }
-
-type AppState = Arc<RwLock<GameState>>;
 
 fn try_move(
     game_state: &mut GameState,
@@ -146,11 +150,9 @@ fn try_move(
     if game_state.status != GameStatus::InProgress {
         return Err(Error::InvalidMove("Game is not in progress"));
     }
-
     if game_state.to_play != player {
         return Err(Error::InvalidMove("Not your turn"));
     }
-
     let target_cell = &mut game_state.board[player_move.row][player_move.col];
     if *target_cell != Cell::Empty {
         return Err(Error::InvalidMove("Cell already occupied"));
@@ -164,15 +166,12 @@ fn try_move(
 }
 
 fn minimax(game_state: &GameState) -> (i32, Option<PlayerMove>) {
-    // The human player is X, the AI is O.
-    // The AI (O) wants to minimize the score.
-    // The human (X) wants to maximize the score.
     match game_state.check_status() {
         GameStatus::Win(winner) => {
             return if winner == Player::X {
-                (10, None) // Human wins
+                (10, None)
             } else {
-                (-10, None) // AI wins
+                (-10, None)
             };
         }
         GameStatus::Draw => return (0, None),
@@ -184,7 +183,6 @@ fn minimax(game_state: &GameState) -> (i32, Option<PlayerMove>) {
         for c in 0..3 {
             if game_state.board[r][c] == Cell::Empty {
                 let mut new_state = *game_state;
-                // It's currently `to_play`'s turn.
                 new_state.board[r][c] = Cell::Occupied(new_state.to_play);
                 new_state.to_play = new_state.to_play.opponent();
                 let (score, _) = minimax(&new_state);
@@ -212,48 +210,86 @@ fn minimax(game_state: &GameState) -> (i32, Option<PlayerMove>) {
 
 fn do_optimal_move(game_state: &mut GameState) -> Result<(), Error> {
     if game_state.status != GameStatus::InProgress {
-        return Ok(()); // Not an error, just nothing to do.
+        return Ok(());
     }
 
     let (_, optimal_move) = minimax(game_state);
     if let Some(player_move) = optimal_move {
-        // The AI is always Player::O
         try_move(game_state, Player::O, player_move)
     } else {
         Err(Error::InvalidMove("AI could not find a valid move"))
     }
 }
 
+// --- Application State ---
+
+// The shared application state: a map from a unique game ID to its state.
+type GameRegistry = HashMap<Uuid, GameState>;
+type AppState = Arc<RwLock<GameRegistry>>;
+
+// --- API Handlers ---
+
+/// Creates a new game, adds it to the registry, and returns the new game ID and state.
+async fn new_game(State(state): State<AppState>) -> impl IntoResponse {
+    let mut registry = state.write().await;
+    let new_game_id = Uuid::new_v4();
+    let new_game = GameState::default();
+
+    registry.insert(new_game_id, new_game);
+
+    println!("Created new game with id: {}", new_game_id);
+
+    Json(serde_json::json!({
+        "game_id": new_game_id,
+        "game_state": new_game
+    }))
+}
+
+/// Updates a specific game state and removes it if the game is over.
 async fn update_game_state(
     State(state): State<AppState>,
+    Path(game_id): Path<Uuid>,
     Json(player_move): Json<PlayerMove>,
-) -> Result<Json<GameState>, Error> {
-    let mut game_state = state.write().await;
+) -> Result<Json<GameState>, Response> {
+    let mut registry = state.write().await;
 
-    // Human player is always X
-    try_move(&mut game_state, Player::X, player_move)?;
+    // We use `get_mut` to ensure we can modify the state.
+    if let Some(mut game_state) = registry.get_mut(&game_id).copied() {
+        try_move(&mut game_state, Player::X, player_move).map_err(|e| e.into_response())?;
 
-    // If game is still on, AI makes its move
-    if game_state.status == GameStatus::InProgress {
-        do_optimal_move(&mut game_state)?;
+        if game_state.status == GameStatus::InProgress {
+            do_optimal_move(&mut game_state).map_err(|e| e.into_response())?;
+        }
+
+        // If the game is over, remove it from the registry.
+        // Otherwise, update the state in the registry.
+        if game_state.status != GameStatus::InProgress {
+            registry.remove(&game_id);
+            println!("Game {} finished and was removed.", game_id);
+        } else {
+            // Update the state in the registry
+            *registry.get_mut(&game_id).unwrap() = game_state;
+        }
+
+        // Return the final or updated state to the client.
+        Ok(Json(game_state))
+    } else {
+        Err((
+            StatusCode::NOT_FOUND,
+            format!("Game with id {} not found", game_id),
+        )
+            .into_response())
     }
-
-    Ok(Json(*game_state))
 }
 
-// NEW: Handler to reset the game
-async fn reset_game_state(State(state): State<AppState>) -> impl IntoResponse {
-    let mut game_state = state.write().await;
-    *game_state = GameState::default();
-    println!("Game state has been reset.\n{}", game_state);
-    (StatusCode::OK, Json(*game_state))
-}
+// --- Main Server Function ---
 
 #[tokio::main]
 async fn main() {
-    let app_state = Arc::new(RwLock::new(GameState::default()));
+    // Initialize the shared state for the game registry.
+    let app_state = Arc::new(RwLock::new(GameRegistry::new()));
 
-    // NEW: Setup CORS layer
+    // Configure CORS to allow requests from the frontend server.
     let cors = CorsLayer::new()
         .allow_origin(
             "http://localhost:3001"
@@ -263,18 +299,18 @@ async fn main() {
         .allow_methods([Method::GET, Method::POST])
         .allow_headers(vec![axum::http::header::CONTENT_TYPE]);
 
+    // Define the application routes.
     let app = Router::new()
-        .route("/api/move", post(update_game_state))
-        .route("/api/reset", post(reset_game_state))
-        .route(
-            "/api/state",
-            get(|State(state): State<AppState>| async move { Json(*state.read().await) }),
-        )
+        .route("/api/newgame", post(new_game))
+        .route("/api/games/{game_id}/move", post(update_game_state))
         .with_state(app_state)
         .layer(cors);
 
+    // Start the server.
     let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
+    println!("Server starting...");
     println!("Listening on http://{}", addr);
+
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
     axum::serve(listener, app)
         .await
