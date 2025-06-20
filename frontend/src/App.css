@@ -1,38 +1,66 @@
-.App {
+.app {
   text-align: center;
 }
 
-.App-logo {
-  height: 40vmin;
-  pointer-events: none;
+.board {
+  display: grid;
+  grid-template-columns: repeat(3, 100px);
+  grid-gap: 5px;
+  margin: 20px auto;
 }
 
-@media (prefers-reduced-motion: no-preference) {
-  .App-logo {
-    animation: App-logo-spin infinite 20s linear;
-  }
-}
-
-.App-header {
-  background-color: #282c34;
-  min-height: 100vh;
+.square {
+  width: 100px;
+  height: 100px;
+  background: #f1f1f1;
+  border: 2px solid #1d7484;
+  border-radius: 5px;
+  cursor: pointer;
   display: flex;
-  flex-direction: column;
-  align-items: center;
   justify-content: center;
-  font-size: calc(10px + 2vmin);
-  color: white;
+  align-items: center;
+  font-size: 3rem;
+  font-weight: bold;
+  color: #4a4a4a;
+  transition: background-color 0.2s;
 }
 
-.App-link {
-  color: #61dafb;
+.square:hover {
+  background: #e8e8e8;
 }
 
-@keyframes App-logo-spin {
-  from {
-    transform: rotate(0deg);
-  }
-  to {
-    transform: rotate(360deg);
-  }
+.square:disabled {
+  cursor: not-allowed;
+  background: #e0e0e0;
+  color: #999;
+}
+
+.square.x {
+  color: #1d7484;
+}
+
+.square.o {
+  color: #d73027;
+}
+
+.game-status {
+  margin-top: 20px;
+  font-size: 1.5rem;
+  min-height: 50px;
+}
+
+.reset-button {
+  margin-top: 15px;
+  padding: 10px 20px;
+  font-size: 1rem;
+  border-radius: 5px;
+  border: none;
+  background-color: #1d7484;
+  color: #f9f9f9;
+  cursor: pointer;
+  transition: background-color 0.2s;
+}
+
+.reset-button:hover {
+  background-color: #144f5a;
 }
