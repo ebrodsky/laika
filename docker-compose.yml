@@ -1,0 +1,21 @@
+services:
+  backend:
+    build: 
+      context: ./backend
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+
+  # The React frontend service
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        API_URL: http://backend:3000/api
+    restart: unless-stopped
+    ports:
+      - "3001:80"
+    depends_on:
+      - backend
+
+
