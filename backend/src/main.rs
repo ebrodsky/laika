@@ -237,7 +237,8 @@ async fn new_game(State(state): State<AppState>) -> impl IntoResponse {
 
     registry.insert(new_game_id, new_game);
 
-    println!("Created new game with id: {}", new_game_id);
+    log::info!("Created new game with id: {}", new_game_id);
+    log::info!("Total number of games: {}", registry.len());
 
     Json(serde_json::json!({
         "game_id": new_game_id,
@@ -265,7 +266,7 @@ async fn update_game_state(
         // Otherwise, update the state in the registry.
         if game_state.status != GameStatus::InProgress {
             registry.remove(&game_id);
-            println!("Game {} finished and was removed.", game_id);
+            log::info!("Game {} finished and was removed.", game_id);
         } else {
             // Update the state in the registry
             *registry.get_mut(&game_id).unwrap() = game_state;
@@ -286,6 +287,10 @@ async fn update_game_state(
 
 #[tokio::main]
 async fn main() {
+    env_logger::Builder::new()
+        .filter_level(log::LevelFilter::Info)
+        .target(env_logger::Target::Stdout)
+        .init();
     // Initialize the shared state for the game registry.
     let app_state = Arc::new(RwLock::new(GameRegistry::new()));
 
@@ -308,8 +313,8 @@ async fn main() {
 
     // Start the server.
     let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
-    println!("Server starting...");
-    println!("Listening on http://{}", addr);
+    log::info!("Server starting...");
+    log::info!("Listening on http://{}", addr);
 
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
     axum::serve(listener, app)
