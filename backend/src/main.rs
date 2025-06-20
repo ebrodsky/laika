@@ -1,14 +1,14 @@
-use std::{net::SocketAddr, sync::Arc};
-
 use axum::{
     extract::State,
-    http::StatusCode,
+    http::{Method, StatusCode},
     response::{IntoResponse, Response},
-    routing::post,
+    routing::{get, post},
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
+use std::{net::SocketAddr, sync::Arc};
 use tokio::sync::RwLock;
+use tower_http::cors::CorsLayer;
 
 enum Error {
     InvalidMove(&'static str),
@@ -69,6 +69,17 @@ struct GameState {
     board: GameBoard,
     status: GameStatus,
     to_play: Player,
+}
+
+// Implement the Default trait for easy game state resetting.
+impl Default for GameState {
+    fn default() -> Self {
+        Self {
+            board: [[Cell::Empty; 3]; 3],
+            status: GameStatus::InProgress,
+            to_play: Player::X,
+        }
+    }
 }
 
 impl std::fmt::Display for GameState {
@@ -153,12 +164,15 @@ fn try_move(
 }
 
 fn minimax(game_state: &GameState) -> (i32, Option<PlayerMove>) {
+    // The human player is X, the AI is O.
+    // The AI (O) wants to minimize the score.
+    // The human (X) wants to maximize the score.
     match game_state.check_status() {
         GameStatus::Win(winner) => {
             return if winner == Player::X {
-                (10, None)
+                (10, None) // Human wins
             } else {
-                (-10, None)
+                (-10, None) // AI wins
             };
         }
         GameStatus::Draw => return (0, None),
@@ -166,11 +180,11 @@ fn minimax(game_state: &GameState) -> (i32, Option<PlayerMove>) {
     }
 
     let mut moves = Vec::new();
-
     for r in 0..3 {
         for c in 0..3 {
             if game_state.board[r][c] == Cell::Empty {
                 let mut new_state = *game_state;
+                // It's currently `to_play`'s turn.
                 new_state.board[r][c] = Cell::Occupied(new_state.to_play);
                 new_state.to_play = new_state.to_play.opponent();
                 let (score, _) = minimax(&new_state);
@@ -180,16 +194,18 @@ fn minimax(game_state: &GameState) -> (i32, Option<PlayerMove>) {
     }
 
     if game_state.to_play == Player::O {
+        // AI is minimizing
         moves
-            .iter()
-            .min_by_key(|(score, _)| score)
-            .map(|(s, m)| (*s, Some(*m)))
+            .into_iter()
+            .min_by_key(|(score, _)| *score)
+            .map(|(s, m)| (s, Some(m)))
             .unwrap()
     } else {
+        // Human is maximizing
         moves
-            .iter()
-            .max_by_key(|(score, _)| score)
-            .map(|(s, m)| (*s, Some(*m)))
+            .into_iter()
+            .max_by_key(|(score, _)| *score)
+            .map(|(s, m)| (s, Some(m)))
             .unwrap()
     }
 }
@@ -201,6 +217,7 @@ fn do_optimal_move(game_state: &mut GameState) -> Result<(), Error> {
 
     let (_, optimal_move) = minimax(game_state);
     if let Some(player_move) = optimal_move {
+        // The AI is always Player::O
         try_move(game_state, Player::O, player_move)
     } else {
         Err(Error::InvalidMove("AI could not find a valid move"))
@@ -213,26 +230,48 @@ async fn update_game_state(
 ) -> Result<Json<GameState>, Error> {
     let mut game_state = state.write().await;
 
+    // Human player is always X
     try_move(&mut game_state, Player::X, player_move)?;
 
+    // If game is still on, AI makes its move
     if game_state.status == GameStatus::InProgress {
         do_optimal_move(&mut game_state)?;
     }
 
-    println!("Updated game state:\n{}", game_state);
     Ok(Json(*game_state))
+}
+
+// NEW: Handler to reset the game
+async fn reset_game_state(State(state): State<AppState>) -> impl IntoResponse {
+    let mut game_state = state.write().await;
+    *game_state = GameState::default();
+    println!("Game state has been reset.\n{}", game_state);
+    (StatusCode::OK, Json(*game_state))
 }
 
 #[tokio::main]
 async fn main() {
-    let app_state = Arc::new(RwLock::new(GameState {
-        board: [[Cell::Empty; 3]; 3],
-        status: GameStatus::InProgress,
-        to_play: Player::X,
-    }));
+    let app_state = Arc::new(RwLock::new(GameState::default()));
+
+    // NEW: Setup CORS layer
+    let cors = CorsLayer::new()
+        .allow_origin(
+            "http://localhost:3001"
+                .parse::<axum::http::HeaderValue>()
+                .unwrap(),
+        )
+        .allow_methods([Method::GET, Method::POST])
+        .allow_headers(vec![axum::http::header::CONTENT_TYPE]);
+
     let app = Router::new()
         .route("/api/move", post(update_game_state))
-        .with_state(app_state);
+        .route("/api/reset", post(reset_game_state))
+        .route(
+            "/api/state",
+            get(|State(state): State<AppState>| async move { Json(*state.read().await) }),
+        )
+        .with_state(app_state)
+        .layer(cors);
 
     let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
     println!("Listening on http://{}", addr);
