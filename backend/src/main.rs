@@ -12,6 +12,7 @@ use tower_http::cors::CorsLayer;
 use uuid::Uuid;
 
 // --- Error Handling ---
+#[derive(Debug)]
 enum Error {
     InvalidMove(&'static str),
 }
@@ -321,4 +322,127 @@ async fn main() {
     axum::serve(listener, app)
         .await
         .expect("Failed to start server");
+}
+
+#[cfg(test)]
+mod tests {
+    // Import everything from the parent module (your main.rs code)
+    use super::*;
+    use rand::rng;
+    use rand::seq::IndexedRandom;
+
+    /// This test plays 100 games with a random-move-making human player (X)
+    /// and asserts that the AI (O) never loses.
+    #[test]
+    fn test_ai_is_unbeatable_over_100_random_games() {
+        for i in 0..100 {
+            println!("\n--- Starting Random Game #{} ---", i + 1);
+            let mut game_state = GameState::default();
+            let mut rng = rng();
+
+            // Loop until the game is no longer in progress.
+            while game_state.status == GameStatus::InProgress {
+                // It's always the human's turn first.
+                assert_eq!(game_state.to_play, Player::X);
+
+                // --- Human's Turn (Player X) ---
+                let mut available_moves = Vec::new();
+                for r in 0..3 {
+                    for c in 0..3 {
+                        if game_state.board[r][c] == Cell::Empty {
+                            available_moves.push(PlayerMove { row: r, col: c });
+                        }
+                    }
+                }
+
+                // If there are no moves, the game should already be over, but we break just in case.
+                if available_moves.is_empty() {
+                    break;
+                }
+
+                // Choose a random valid move for the human player.
+                let human_move = *available_moves.choose(&mut rng).unwrap();
+                println!(
+                    "Human (X) plays at ({}, {})",
+                    human_move.row, human_move.col
+                );
+
+                // Apply the human's move.
+                try_move(&mut game_state, Player::X, human_move)
+                    .expect("Human move should be valid");
+
+                // Check if the human's move ended the game.
+                if game_state.status != GameStatus::InProgress {
+                    break;
+                }
+
+                // --- AI's Turn (Player O) ---
+                assert_eq!(game_state.to_play, Player::O);
+                println!("AI (O) is thinking...");
+
+                // The AI makes its optimal move.
+                do_optimal_move(&mut game_state).expect("AI move should be valid");
+                println!("{}", game_state);
+            }
+
+            println!("Game Over. Final Status: {:?}", game_state.status);
+
+            // --- THE CORE ASSERTION ---
+            // The human player (X) should NEVER win.
+            // The game can be a Draw or a Win for O.
+            assert_ne!(
+                game_state.status,
+                GameStatus::Win(Player::X),
+                "AI FAILED: The AI lost a game! Final board:\n{}",
+                game_state
+            );
+        }
+    }
+
+    #[test]
+    fn test_optimal_vs_optimal_is_always_a_draw() {
+        println!("\n--- Starting Optimal vs Optimal Game ---");
+        let mut game_state = GameState::default();
+
+        while game_state.status == GameStatus::InProgress {
+            // --- Player X's Turn (Optimal "Human") ---
+            if game_state.to_play == Player::X {
+                println!("Optimal Human (X) is thinking...");
+                // We manually find and apply the best move for 'X' since
+                // do_optimal_move is hardcoded for Player O.
+                let (_, optimal_move_for_x) = minimax(&game_state);
+                let player_move =
+                    optimal_move_for_x.expect("Minimax should always find a move for X");
+
+                try_move(&mut game_state, Player::X, player_move)
+                    .expect("Optimal move for X should be valid");
+
+                println!("{}", game_state);
+            }
+
+            // Check if Player X's move ended the game
+            if game_state.status != GameStatus::InProgress {
+                break;
+            }
+
+            // --- Player O's Turn (AI) ---
+            if game_state.to_play == Player::O {
+                println!("AI (O) is thinking...");
+                // We can use the existing function here as it's designed for 'O'.
+                do_optimal_move(&mut game_state).expect("Optimal move for O should be valid");
+                println!("{}", game_state);
+            }
+        }
+
+        println!("Game Over. Final Status: {:?}", game_state.status);
+
+        // --- THE CORE ASSERTION ---
+        // A game between two perfect players must result in a draw.
+        assert_eq!(
+            game_state.status,
+            GameStatus::Draw,
+            "MINIMAX FAILED: A game between two optimal players did not result in a draw! Final board:\n{}",
+            game_state
+        );
+    }
 }
