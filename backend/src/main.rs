@@ -267,6 +267,7 @@ async fn update_game_state(
         if game_state.status != GameStatus::InProgress {
             registry.remove(&game_id);
             log::info!("Game {} finished and was removed.", game_id);
+            log::info!("Total number of games after removal: {}", registry.len());
         } else {
             // Update the state in the registry
             *registry.get_mut(&game_id).unwrap() = game_state;
